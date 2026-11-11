@@ -45,9 +45,9 @@ export async function POST(req: NextRequest) {
 
     // مزود AR (مفاتيح sk-ar-v1-) يُبنى برمزيًا لضمان سلامة الحروف: a-n-y-r-o-u-t-e-r
     const arProvider = String.fromCharCode(97, 110, 121, 114, 111, 117, 116, 101, 114);
-    const KNOWN_PROVIDERS = ["kie", "cometapi", "google", "openrouter", "pollinations", "groq", "cloudflare", "unknown", arProvider, "bynara"];
+    const KNOWN_PROVIDERS = ["kie", "cometapi", "google", "openrouter", "pollinations", "groq", "cloudflare", "unknown", arProvider, "bynara", "apinex"];
     if (!KNOWN_PROVIDERS.includes(provider)) {
-      return NextResponse.json({ error: "المزود غير معروف — المسموح: kie، cometapi، google، openrouter، pollinations، groq، cloudflare، unknown، AR (sk-ar-v1-)، Bynara (sk-nry-)" }, { status: 400 });
+      return NextResponse.json({ error: "المزود غير معروف — المسموح: kie، cometapi، google، openrouter، pollinations، groq، cloudflare، unknown، AR (sk-ar-v1-)، Bynara (sk-nry-)، APInex (sk-apx-)" }, { status: 400 });
     }
     if (!apiKey || apiKey.length < 8) {
       return NextResponse.json({ error: "المفتاح فارغ أو قصير جدًا" }, { status: 400 });

@@ -103,15 +103,23 @@ async function tryCreateWithKeys(opts: {
 }): Promise<CreateAttemptOutcome> {
   const { task, modelDef, input, skipIds } = opts;
   const pool = await getKeyPool(modelDef.providers);
-  const candidates = pool.filter((k) => !skipIds?.has(k.id) && modelDef.providers.includes(k.provider as ProviderId));
+  // الترتيب: أولوية المزوّدين في تعريف الموديل أولًا (مثلاً APInex قبل kie للصور)،
+  // ثم ترتيب إضافة المفاتيح داخل نفس المزوّد (فرز مستقر يحافظ على القاعدة الذهبية القديمة)
+  const providerIndex = (p: string) => {
+    const i = modelDef.providers.indexOf(p as ProviderId);
+    return i === -1 ? modelDef.providers.length : i;
+  };
+  const candidates = pool
+    .filter((k) => !skipIds?.has(k.id) && modelDef.providers.includes(k.provider as ProviderId))
+    .sort((a, b) => providerIndex(a.provider) - providerIndex(b.provider));
 
   for (const key of candidates) {
     const adapter = getAdapter(key.provider as ProviderId);
     const providerModel = modelDef.providerModel[key.provider] ?? modelDef.canonical;
     try {
-      // صور متزامنة إن دعم المزود ذلك (CometAPI)
+      // صور متزامنة إن دعم المزود ذلك (APInex/CometAPI) — نموذج المزود يُمرَّر صراحة
       if (task.type === "image" && adapter.createImageSync) {
-        const { urls } = await adapter.createImageSync(key, input as ImageInput);
+        const { urls } = await adapter.createImageSync(key, input as ImageInput, providerModel);
         await bumpKeyCounters(key.id, true);
         // مفتاح كان مستنزفًا وعاد للعمل (شُحن رصيده) → نعيده active
         if (key.status === "exhausted") await setKeyStatus(key.id, "active", null);

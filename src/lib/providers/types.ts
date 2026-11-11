@@ -35,8 +35,8 @@ export interface VideoInput {
 export interface ProviderAdapter {
   /** مهمة غير متزامنة (فيديو، وبعض الصور): تعيد providerTaskId */
   createTask(key: KeyRow, model: string, input: ImageInput | VideoInput): Promise<CreateTaskResult>;
-  /** صور متزامنة إن كان المزود يدعمها (CometAPI تعيد النتيجة فورًا) */
-  createImageSync?(key: KeyRow, input: ImageInput): Promise<{ urls: string[] }>;
+  /** صور متزامنة إن كان المزود يدعمها (CometAPI وAPInex تعيدان النتيجة فورًا) — model اسم الموديل لدى المزود */
+  createImageSync?(key: KeyRow, input: ImageInput, model?: string): Promise<{ urls: string[] }>;
   /** استعلام حالة مهمة جارية */
   checkTask(key: KeyRow, providerTaskId: string): Promise<CheckResult>;
 }

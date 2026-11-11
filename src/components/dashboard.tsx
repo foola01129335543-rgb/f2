@@ -70,6 +70,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   google: "Google (Gemini)",
   openrouter: "OpenRouter",
   pollinations: "Pollinations (مجاني)",
+  apinex: "APInex (صور فقط)",
   groq: "Groq (نصوص فقط)",
   bynara: "Bynara (نصوص فقط)",
   cloudflare: "Cloudflare",
@@ -220,6 +221,7 @@ export default function Dashboard() {
                   <SelectItem value="google">Google (Gemini)</SelectItem>
                   <SelectItem value="openrouter">OpenRouter</SelectItem>
                   <SelectItem value="pollinations">Pollinations (مجاني)</SelectItem>
+                  <SelectItem value="apinex">APInex (صور فقط)</SelectItem>
                   <SelectItem value="groq">Groq (نصوص فقط)</SelectItem>
                   <SelectItem value="bynara">Bynara (نصوص فقط)</SelectItem>
                   <SelectItem value={AR_PROVIDER}>AR (sk-ar-v1-) نصوص فقط</SelectItem>

@@ -50,13 +50,15 @@ export interface AttemptRecord {
 
 /** مزودو المفاتيح — يشمل مزودين غير خادمين للتوليد (groq/bynara/anyrouter/cloudflare/unknown)
  *  groq ومفاتيح AR (sk-ar-v1-) ومفاتيح Bynara (sk-nry-) صالحة لكنها للنصوص فقط — لا نماذج صور/فيديو لديها،
- *  لذلك لا تُذكر في سلاسل التوليد (models.ts) وتُحفظ مفاتيحها للتوثيق والاستخدام المستقبلي. */
+ *  لذلك لا تُذكر في سلاسل التوليد (models.ts) وتُحفظ مفاتيحها للتوثيق والاستخدام المستقبلي.
+ *  apinex (sk-apx-) مزود صور فقط — أول في سلسلة الصور بدلًا من kie (بلا فيديو). */
 export type ApiKeyProvider =
   | "kie"
   | "cometapi"
   | "google"
   | "openrouter"
   | "pollinations"
+  | "apinex"
   | "groq"
   | "bynara"
   | "anyrouter"

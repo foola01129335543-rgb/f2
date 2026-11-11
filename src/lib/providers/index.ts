@@ -7,6 +7,7 @@ import { cometApiAdapter } from "./cometapi";
 import { googleAdapter } from "./google";
 import { openRouterAdapter } from "./openrouter";
 import { pollinationsAdapter } from "./pollinations";
+import { apinexAdapter } from "./apinex";
 import type { ProviderAdapter } from "./types";
 
 const ADAPTERS: Record<ProviderId, ProviderAdapter> = {
@@ -15,6 +16,7 @@ const ADAPTERS: Record<ProviderId, ProviderAdapter> = {
   google: googleAdapter,
   openrouter: openRouterAdapter,
   pollinations: pollinationsAdapter,
+  apinex: apinexAdapter,
 };
 
 export function getAdapter(provider: ProviderId): ProviderAdapter {
