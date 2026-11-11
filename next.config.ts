@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  // ملاحظة نشر: output:"standalone" يمنع Vercel من خدمة المسارات نهائيًا (404 شامل)
+  // — أُزيل لبيئة Vercel فقط، ولا يؤثر على سلوك التطبيق أو أدواته أو نماذجه.
   reactStrictMode: false,
   async rewrites() {
     return {
