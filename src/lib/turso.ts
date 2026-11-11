@@ -48,9 +48,19 @@ export interface AttemptRecord {
   at: string;
 }
 
+/** مزودو المفاتيح — يشمل مزودين غير خادمين للتوليد (cloudflare/unknown) يُحتفظ بهم معطّلين */
+export type ApiKeyProvider =
+  | "kie"
+  | "cometapi"
+  | "google"
+  | "openrouter"
+  | "pollinations"
+  | "cloudflare"
+  | "unknown";
+
 export interface KeyRow {
   id: string;
-  provider: "kie" | "cometapi" | "google";
+  provider: ApiKeyProvider;
   label: string;
   api_key: string;
   status: "active" | "exhausted" | "disabled";
@@ -281,7 +291,7 @@ export async function listKeys(): Promise<KeyRow[]> {
 }
 
 /** مجمع المفاتيح: الترتيب التسلسلي الصارم حسب الإضافة (created_at ASC, id ASC) — ليس round-robin */
-export async function getKeyPool(providers: Array<"kie" | "cometapi" | "google">): Promise<KeyRow[]> {
+export async function getKeyPool(providers: ApiKeyProvider[]): Promise<KeyRow[]> {
   await ensureSchema();
   if (!providers.length) return [];
   const placeholders = providers.map(() => "?").join(",");
@@ -295,7 +305,7 @@ export async function getKeyPool(providers: Array<"kie" | "cometapi" | "google">
 }
 
 export async function insertKey(k: {
-  id: string; provider: "kie" | "cometapi" | "google"; label?: string; api_key: string;
+  id: string; provider: ApiKeyProvider; label?: string; api_key: string;
 }): Promise<KeyRow> {
   await ensureSchema();
   await getDb().execute({

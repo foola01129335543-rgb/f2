@@ -103,10 +103,10 @@ async function tryCreateWithKeys(opts: {
 }): Promise<CreateAttemptOutcome> {
   const { task, modelDef, input, skipIds } = opts;
   const pool = await getKeyPool(modelDef.providers);
-  const candidates = pool.filter((k) => !skipIds?.has(k.id));
+  const candidates = pool.filter((k) => !skipIds?.has(k.id) && modelDef.providers.includes(k.provider as ProviderId));
 
   for (const key of candidates) {
-    const adapter = getAdapter(key.provider);
+    const adapter = getAdapter(key.provider as ProviderId);
     const providerModel = modelDef.providerModel[key.provider] ?? modelDef.canonical;
     try {
       // صور متزامنة إن دعم المزود ذلك (CometAPI)
@@ -218,7 +218,7 @@ export async function runGeneration(
     progress: 5,
   }))!;
   let providerTaskId = created.providerTaskId!;
-  let adapter = getAdapter(created.key!.provider);
+  let adapter = getAdapter(created.key!.provider as ProviderId);
   let currentKey = created.key!;
 
   // 5) نافذة الانتظار: استعلام كل 3 ثوانٍ مع بث تقدم حي
@@ -274,7 +274,7 @@ export async function runGeneration(
             return { status: "completed", text: fmtImageDone(retry.syncUrls!), task };
           }
           providerTaskId = retry.providerTaskId!;
-          adapter = getAdapter(retry.key!.provider);
+          adapter = getAdapter(retry.key!.provider as ProviderId);
           currentKey = retry.key!;
           deadline = Date.now() + waitSec * 1000; // نافذة جديدة للمحاولة الجديدة
           continue;
