@@ -1,0 +1,618 @@
+     1→     1→     1→// =============================================================================
+     2→     2→     2→// منسّق التوليد — runGeneration / runMerge / refreshTask / refreshMergeTask
+     3→     3→     3→//
+     4→     4→     4→// القواعد الذهبية المطبقة هنا:
+     5→     5→     5→// 1) سجل المهمة في Turso قبل أي نداء خارجي.
+     6→     6→     6→// 2) تجربة المفاتيح بالترتيب التسلسلي الصارم حسب الإضافة؛ أول نجاح يربط المهمة.
+     7→     7→     7→// 3) أي فشل مفتاح/رصيد (قبل الإنشاء أو في منتصف المهمة) → إعادة إنشاء نفس المهمة
+     8→     8→     8→//    بنفس task_id على المفتاح التالي تلقائيًا — العميل لا يرى شيئًا أبدًا.
+     9→     9→     9→// 4) فشل الإنشاء على كل المفاتيح → تبقى المهمة processing «بانتظار توفر مفتاح
+    10→    10→    10→//    صالح…» وتُعاد المحاولة مع كل get_task بعد تهدئة ~45 ثانية.
+    11→    11→    11→// 5) الدمج: أي خطأ معلن من خدمة الدمج (4xx/5xx) = فشل حتمي فوري — لا إعادة محاولة.
+    12→    12→    12→// =============================================================================
+    13→    13→    13→import { randomUUID } from "node:crypto";
+    14→    14→    14→import {
+    15→    15→    15→  getTask, getKeyPool, insertTask, updateTask,
+    16→    16→    16→  setKeyStatus, bumpKeyCounters,
+    17→    17→    17→  safeParse, type KeyRow, type TaskRow, type AttemptRecord,
+    18→    18→    18→} from "@/lib/turso";
+    19→    19→    19→import { resolveModel, type ModelDef, type ProviderId } from "@/lib/models";
+    20→    20→    20→import { classifyProviderError, looksLikeKeyIssue } from "@/lib/keys";
+    21→    21→    21→import { getAdapter, ProviderError, type ImageInput, type VideoInput } from "@/lib/providers";
+    22→    22→    22→import {
+    23→    23→    23→  MERGER_LIMITS, createMergeJob, getMergeJob, processMergeJob, type MergerJobInfo,
+    24→    24→    24→} from "@/lib/merger";
+    25→    25→    25→import {
+    26→    26→    26→  fmtFailed, fmtGetTask, fmtImageDone, fmtMergeDone, fmtMergeMax, fmtMergeNeedsTwo,
+    27→    27→    27→  fmtNoKeys, fmtProcessing, fmtTaskNotFound, fmtVideoDone,
+    28→    28→    28→} from "@/lib/format";
+    29→    29→    29→
+    30→    30→    30→// سقف نافذة الانتظار داخل الطلب (قابل للضبط) — بعده يعيد الأداة task_id ليتابع العميل بـ get_task
+    31→    31→    31→const WAIT_CAP = Math.min(Math.max(Number(process.env.MCP_WAIT_CAP_SECONDS ?? 240), 0), 240);
+    32→    32→    32→const POLL_INTERVAL_MS = 3_000;
+    33→    33→    33→const CREATE_RETRY_COOLDOWN_MS = 45_000;
+    34→    34→    34→
+    35→    35→    35→export interface ToolOutcome {
+    36→    36→    36→  status: "completed" | "processing" | "failed" | "no_keys" | "params";
+    37→    37→    37→  text: string;
+    38→    38→    38→  isError?: boolean;
+    39→    39→    39→  task?: TaskRow;
+    40→    40→    40→}
+    41→    41→    41→
+    42→    42→    42→type NotifyFn = (progress: number, total: number, message: string) => Promise<void>;
+    43→    43→    43→
+    44→    44→    44→function sleep(ms: number): Promise<void> {
+    45→    45→    45→  return new Promise((r) => setTimeout(r, ms));
+    46→    46→    46→}
+    47→    47→    47→
+    48→    48→    48→/** إخفاء أي نص طويل قد يحتوي مفاتيح من رسائل الأخطاء قبل عرضها للعميل */
+    49→    49→    49→function sanitize(msg: string): string {
+    50→    50→    50→  return String(msg ?? "سبب غير معروف").replace(/[A-Za-z0-9_\-./]{25,}/g, "***").slice(0, 300);
+    51→    51→    51→}
+    52→    52→    52→
+    53→    53→    53→function effectiveWait(requested: number | undefined, fallback: number): number {
+    54→    54→    54→  const w = typeof requested === "number" && requested >= 0 ? requested : fallback;
+    55→    55→    55→  return Math.min(w, WAIT_CAP);
+    56→    56→    56→}
+    57→    57→    57→
+    58→    58→    58→// -----------------------------------------------------------------------------
+    59→    59→    59→// بناء معطيات المزود من معطيات الأداة
+    60→    60→    60→// -----------------------------------------------------------------------------
+    61→    61→    61→function buildImageInput(args: Record<string, unknown>): ImageInput {
+    62→    62→    62→  const input: ImageInput = { prompt: String(args.prompt) };
+    63→    63→    63→  const ar = args.aspect_ratio as string | undefined;
+    64→    64→    64→  if (ar && ar !== "auto") input.aspect_ratio = ar;
+    65→    65→    65→  if (args.resolution) input.resolution = String(args.resolution);
+    66→    66→    66→  if (args.output_format) input.output_format = String(args.output_format);
+    67→    67→    67→  // background يُطبق عند 1K فقط حسب المواصفة
+    68→    68→    68→  if (args.background && args.background !== "auto" && (args.resolution ?? "1K") === "1K") {
+    69→    69→    69→    input.background = String(args.background);
+    70→    70→    70→  }
+    71→    71→    71→  return input;
+    72→    72→    72→}
+    73→    73→    73→
+    74→    74→    74→function buildVideoInput(args: Record<string, unknown>): VideoInput {
+    75→    75→    75→  const input: VideoInput = { prompt: String(args.prompt) };
+    76→    76→    76→  if (args.image_url) input.image_url = String(args.image_url);
+    77→    77→    77→  const ar = args.aspect_ratio as string | undefined;
+    78→    78→    78→  if (ar && ar !== "auto") input.aspect_ratio = ar;
+    79→    79→    79→  if (args.resolution) input.resolution = String(args.resolution);
+    80→    80→    80→  if (typeof args.enable_audio === "boolean") input.enable_audio = args.enable_audio;
+    81→    81→    81→  if (typeof args.duration === "number") input.duration = Math.round(args.duration);
+    82→    82→    82→  return input;
+    83→    83→    83→}
+    84→    84→    84→
+    85→    85→    85→interface CreateAttemptOutcome {
+    86→    86→    86→  kind: "created" | "created_sync" | "params" | "exhausted";
+    87→    87→    87→  key?: KeyRow;
+    88→    88→    88→  providerTaskId?: string;
+    89→    89→    89→  syncUrls?: string[];
+    90→    90→    90→  paramsMessage?: string;
+    91→    91→    91→}
+    92→    92→    92→
+    93→    93→    93→/**
+    94→    94→    94→ * تجربة المرشحين بالترتيب حتى نجاح الإنشاء.
+    95→    95→    95→ * كل محاولة (نجاحًا أو فشلًا) تُسجَّل في attempts_json وتحدّث عدّادات المفتاح.
+    96→    96→    96→ * skipIds: مفاتيح يُتجاوزها هذا التشغيل فقط (المفتاح الذي فشل للتو في منتصف المهمة).
+    97→    97→    97→ */
+    98→    98→    98→async function tryCreateWithKeys(opts: {
+    99→    99→    99→  task: TaskRow;
+   100→   100→   100→  modelDef: ModelDef;
+   101→   101→   101→  input: ImageInput | VideoInput;
+   102→   102→   102→  skipIds?: Set<string>;
+   103→   103→   103→}): Promise<CreateAttemptOutcome> {
+   104→   104→   104→  const { task, modelDef, input, skipIds } = opts;
+   105→   105→   105→  const pool = await getKeyPool(modelDef.providers);
+   106→   106→   106→  const candidates = pool.filter((k) => !skipIds?.has(k.id) && modelDef.providers.includes(k.provider as ProviderId));
+   107→   107→   107→
+   108→   108→   108→  for (const key of candidates) {
+   109→   109→   109→    const adapter = getAdapter(key.provider as ProviderId);
+   110→   110→   110→    const providerModel = modelDef.providerModel[key.provider] ?? modelDef.canonical;
+   111→   111→   111→    try {
+   112→   112→   112→      // صور متزامنة إن دعم المزود ذلك (CometAPI)
+   113→   113→   113→      if (task.type === "image" && adapter.createImageSync) {
+   114→   114→   114→        const { urls } = await adapter.createImageSync(key, input as ImageInput);
+   115→   115→   115→        await bumpKeyCounters(key.id, true);
+   116→   116→   116→        // مفتاح كان مستنزفًا وعاد للعمل (شُحن رصيده) → نعيده active
+   117→   117→   117→        if (key.status === "exhausted") await setKeyStatus(key.id, "active", null);
+   118→   118→   118→        await recordAttempt(task.id, { provider: key.provider, keyId: key.id, ok: true });
+   119→   119→   119→        return { kind: "created_sync", key, syncUrls: urls };
+   120→   120→   120→      }
+   121→   121→   121→      const { providerTaskId } = await adapter.createTask(key, providerModel, input);
+   122→   122→   122→      await bumpKeyCounters(key.id, true);
+   123→   123→   123→      if (key.status === "exhausted") await setKeyStatus(key.id, "active", null);
+   124→   124→   124→      await recordAttempt(task.id, { provider: key.provider, keyId: key.id, ok: true });
+   125→   125→   125→      return { kind: "created", key, providerTaskId };
+   126→   126→   126→    } catch (err) {
+   127→   127→   127→      const cls = classifyProviderError(err);
+   128→   128→   128→      const msg = err instanceof Error ? err.message : String(err);
+   129→   129→   129→      await bumpKeyCounters(key.id, false, msg.slice(0, 240));
+   130→   130→   130→      await recordAttempt(task.id, {
+   131→   131→   131→        provider: key.provider, keyId: key.id, ok: false,
+   132→   132→   132→        errorClass: cls, error: msg.slice(0, 240),
+   133→   133→   133→      });
+   134→   134→   134→      if (cls === "params") {
+   135→   135→   135→        // خطأ معطيات — توقف فورًا: تبديل المفاتيح لن يحلّه
+   136→   136→   136→        return { kind: "params", paramsMessage: sanitize(msg) };
+   137→   137→   137→      }
+   138→   138→   138→      if (cls === "disabled") {
+   139→   139→   139→        await setKeyStatus(key.id, "disabled", msg.slice(0, 240)); // مفتاح مرفوض → تعطيل تلقائي
+   140→   140→   140→        continue; // → المفتاح التالي
+   141→   141→   141→      }
+   142→   142→   142→      if (cls === "exhausted") {
+   143→   143→   143→        await setKeyStatus(key.id, "exhausted", msg.slice(0, 240)); // يبقى في القاعدة
+   144→   144→   144→        continue; // → المفتاح التالي
+   145→   145→   145→      }
+   146→   146→   146→      // provider (موديل غير مدعوم) أو temporary → التالي
+   147→   147→   147→      continue;
+   148→   148→   148→    }
+   149→   149→   149→  }
+   150→   150→   150→  return { kind: "exhausted" };
+   151→   151→   151→}
+   152→   152→   152→
+   153→   153→   153→async function recordAttempt(taskId: string, a: Omit<AttemptRecord, "at">): Promise<void> {
+   154→   154→   154→  // تُسجَّل المحاولة عبر updateTask بلا تعديل حقول أخرى
+   155→   155→   155→  await updateTask(taskId, {}, { ...a, at: new Date().toISOString() });
+   156→   156→   156→}
+   157→   157→   157→
+   158→   158→   158→// -----------------------------------------------------------------------------
+   159→   159→   159→// توليد صورة / فيديو
+   160→   160→   160→// -----------------------------------------------------------------------------
+   161→   161→   161→export async function runGeneration(
+   162→   162→   162→  type: "image" | "video",
+   163→   163→   163→  args: Record<string, unknown>,
+   164→   164→   164→  notify?: NotifyFn
+   165→   165→   165→): Promise<ToolOutcome> {
+   166→   166→   166→  const modelDef = resolveModel(args.model as string | undefined);
+   167→   167→   167→  if (!modelDef || modelDef.type !== type) {
+   168→   168→   168→    return {
+   169→   169→   169→      status: "params",
+   170→   170→   170→      isError: true,
+   171→   171→   171→      text: fmtFailed(`موديل غير معروف: ${String(args.model ?? "")}. المتاح: gpt-image-2-6/flare-text-to-image (صور) و grok-imagine-video-1-5-preview (فيديو).`),
+   172→   172→   172→    };
+   173→   173→   173→  }
+   174→   174→   174→
+   175→   175→   175→  const pool = await getKeyPool(modelDef.providers);
+   176→   176→   176→  if (!pool.length) return { status: "no_keys", isError: true, text: fmtNoKeys(modelDef.canonical) };
+   177→   177→   177→
+   178→   178→   178→  // 3) سجّل المهمة قبل أي نداء خارجي
+   179→   179→   179→  const input = type === "image" ? buildImageInput(args) : buildVideoInput(args);
+   180→   180→   180→  let task = await insertTask({
+   181→   181→   181→    id: randomUUID(),
+   182→   182→   182→    model: modelDef.canonical,
+   183→   183→   183→    type,
+   184→   184→   184→    prompt: input.prompt,
+   185→   185→   185→    params_json: JSON.stringify(args),
+   186→   186→   186→    status: "processing",
+   187→   187→   187→  });
+   188→   188→   188→
+   189→   189→   189→  const waitSec = effectiveWait(args.wait_seconds as number | undefined, type === "image" ? 90 : 25);
+   190→   190→   190→  let deadline = Date.now() + waitSec * 1000;
+   191→   191→   191→
+   192→   192→   192→  // 4) تجربة المرشحين بالترتيب حتى نجاح الإنشاء
+   193→   193→   193→  let created = await tryCreateWithKeys({ task, modelDef, input });
+   194→   194→   194→  if (created.kind === "params") {
+   195→   195→   195→    task = (await updateTask(task.id, { status: "failed", error_message: created.paramsMessage }))!;
+   196→   196→   196→    return { status: "failed", isError: true, text: fmtFailed(created.paramsMessage!), task };
+   197→   197→   197→  }
+   198→   198→   198→  if (created.kind === "exhausted") {
+   199→   199→   199→    // تبقى processing — تُعاد المحاولة مع كل get_task بعد التهدئة (لا شيء يُذكر للعميل)
+   200→   200→   200→    task = (await updateTask(task.id, { error_message: "بانتظار توفر مفتاح صالح…" }))!;
+   201→   201→   201→    return { status: "processing", text: fmtProcessing(task.id), task };
+   202→   202→   202→  }
+   203→   203→   203→
+   204→   204→   204→  if (created.kind === "created_sync") {
+   205→   205→   205→    task = (await updateTask(task.id, {
+   206→   206→   206→      provider: created.key!.provider, key_id: created.key!.id,
+   207→   207→   207→      status: "completed", result_urls_json: JSON.stringify(created.syncUrls),
+   208→   208→   208→    }))!;
+   209→   209→   209→    notify?.(100, 100, "اكتمل التوليد").catch(() => {});
+   210→   210→   210→    return { status: "completed", text: fmtImageDone(created.syncUrls!), task };
+   211→   211→   211→  }
+   212→   212→   212→
+   213→   213→   213→  // نجح الإنشاء — اربط المهمة بالمزود والمفتاح
+   214→   214→   214→  task = (await updateTask(task.id, {
+   215→   215→   215→    provider: created.key!.provider,
+   216→   216→   216→    provider_task_id: created.providerTaskId,
+   217→   217→   217→    key_id: created.key!.id,
+   218→   218→   218→    progress: 5,
+   219→   219→   219→  }))!;
+   220→   220→   220→  let providerTaskId = created.providerTaskId!;
+   221→   221→   221→  let adapter = getAdapter(created.key!.provider as ProviderId);
+   222→   222→   222→  let currentKey = created.key!;
+   223→   223→   223→
+   224→   224→   224→  // 5) نافذة الانتظار: استعلام كل 3 ثوانٍ مع بث تقدم حي
+   225→   225→   225→  while (Date.now() < deadline) {
+   226→   226→   226→    let check;
+   227→   227→   227→    try {
+   228→   228→   228→      check = await adapter.checkTask(currentKey, providerTaskId);
+   229→   229→   229→    } catch (err) {
+   230→   230→   230→      // أخطاء شبكتنا نحن (timeout/fetch) = مؤقتة → استمر بالاستعلام
+   231→   231→   231→      if (!(err instanceof ProviderError) || err.status !== 0) {
+   232→   232→   232→        // خطأ مصنَّف من المزود أثناء الاستعلام: عالجه كفشل منتصف مهمة
+   233→   233→   233→        check = { status: "failed", error: err instanceof Error ? err.message : String(err) };
+   234→   234→   234→      } else {
+   235→   235→   235→        await sleep(POLL_INTERVAL_MS);
+   236→   236→   236→        continue;
+   237→   237→   237→      }
+   238→   238→   238→    }
+   239→   239→   239→
+   240→   240→   240→    if (check.status === "processing") {
+   241→   241→   241→      const p = check.progress ?? task.progress;
+   242→   242→   242→      if (Number.isFinite(p) && p > task.progress) task = (await updateTask(task.id, { progress: Math.round(p) })) ?? task;
+   243→   243→   243→      notify?.(Math.round(check.progress ?? task.progress), 100, `قيد التوليد… ${Math.round(check.progress ?? task.progress)}%`).catch(() => {});
+   244→   244→   244→      await sleep(POLL_INTERVAL_MS);
+   245→   245→   245→      continue;
+   246→   246→   246→    }
+   247→   247→   247→
+   248→   248→   248→    if (check.status === "completed" && check.urls?.length) {
+   249→   249→   249→      task = (await updateTask(task.id, { status: "completed", result_urls_json: JSON.stringify(check.urls) }))!;
+   250→   250→   250→      notify?.(100, 100, "اكتمل التوليد").catch(() => {});
+   251→   251→   251→      return {
+   252→   252→   252→        status: "completed",
+   253→   253→   253→        text: type === "image" ? fmtImageDone(check.urls) : fmtVideoDone(check.urls),
+   254→   254→   254→        task,
+   255→   255→   255→      };
+   256→   256→   256→    }
+   257→   257→   257→
+   258→   258→   258→    if (check.status === "failed") {
+   259→   259→   259→      const msg = String(check.error ?? "");
+   260→   260→   260→      if (looksLikeKeyIssue(msg)) {
+   261→   261→   261→        // فشل مفتاح/رصيد في منتصف المهمة → أعد إنشاء نفس المهمة بنفس task_id على المفتاح التالي
+   262→   262→   262→        const skip = new Set<string>([currentKey.id]);
+   263→   263→   263→        const retry = await tryCreateWithKeys({ task, modelDef, input, skipIds: skip });
+   264→   264→   264→        if (retry.kind === "created" || retry.kind === "created_sync") {
+   265→   265→   265→          task = (await updateTask(task.id, {
+   266→   266→   266→            provider: retry.key!.provider,
+   267→   267→   267→            key_id: retry.key!.id,
+   268→   268→   268→            provider_task_id: retry.providerTaskId ?? task.provider_task_id,
+   269→   269→   269→            error_message: null,
+   270→   270→   270→            progress: 5,
+   271→   271→   271→          }))!;
+   272→   272→   272→          if (retry.kind === "created_sync") {
+   273→   273→   273→            task = (await updateTask(task.id, { status: "completed", result_urls_json: JSON.stringify(retry.syncUrls) }))!;
+   274→   274→   274→            return { status: "completed", text: fmtImageDone(retry.syncUrls!), task };
+   275→   275→   275→          }
+   276→   276→   276→          providerTaskId = retry.providerTaskId!;
+   277→   277→   277→          adapter = getAdapter(retry.key!.provider as ProviderId);
+   278→   278→   278→          currentKey = retry.key!;
+   279→   279→   279→          deadline = Date.now() + waitSec * 1000; // نافذة جديدة للمحاولة الجديدة
+   280→   280→   280→          continue;
+   281→   281→   281→        }
+   282→   282→   282→        if (retry.kind === "params") {
+   283→   283→   283→          task = (await updateTask(task.id, { status: "failed", error_message: retry.paramsMessage }))!;
+   284→   284→   284→          return { status: "failed", isError: true, text: fmtFailed(retry.paramsMessage!), task };
+   285→   285→   285→        }
+   286→   286→   286→        // لا مفتاح متاح الآن → تبقى processing بصمت
+   287→   287→   287→        task = (await updateTask(task.id, { error_message: "بانتظار توفر مفتاح صالح…" }))!;
+   288→   288→   288→        return { status: "processing", text: fmtProcessing(task.id), task };
+   289→   289→   289→      }
+   290→   290→   290→      // فشل حقيقي (انتهاك سياسة/معطيات) → failed
+   291→   291→   291→      task = (await updateTask(task.id, { status: "failed", error_message: sanitize(msg) }))!;
+   292→   292→   292→      return { status: "failed", isError: true, text: fmtFailed(sanitize(msg)), task };
+   293→   293→   293→    }
+   294→   294→   294→  }
+   295→   295→   295→
+   296→   296→   296→  // 7) انتهت النافذة والنتيجة لم تظهر → أعد المهمة بحالة processing ليتابعها العميل
+   297→   297→   297→  return { status: "processing", text: fmtProcessing(task.id, task.progress), task };
+   298→   298→   298→}
+   299→   299→   299→
+   300→   300→   300→// -----------------------------------------------------------------------------
+   301→   301→   301→// دمج الفيديوهات — runMerge (القسم 7.3)
+   302→   302→   302→// -----------------------------------------------------------------------------
+   303→   303→   303→export async function runMerge(args: Record<string, unknown>, notify?: NotifyFn): Promise<ToolOutcome> {
+   304→   304→   304→  const urlsArg = Array.isArray(args.urls) ? (args.urls as string[]) : [];
+   305→   305→   305→  const taskIdsArg = Array.isArray(args.task_ids) ? (args.task_ids as string[]) : [];
+   306→   306→   306→
+   307→   307→   307→  // 1) تحقق صارم: مجموع ≥2 و ≤10
+   308→   308→   308→  if (urlsArg.length + taskIdsArg.length < 2) {
+   309→   309→   309→    return { status: "params", isError: true, text: fmtMergeNeedsTwo() };
+   310→   310→   310→  }
+   311→   311→   311→  if (urlsArg.length + taskIdsArg.length > MERGER_LIMITS.maxClips) {
+   312→   312→   312→    return { status: "params", isError: true, text: fmtMergeMax(MERGER_LIMITS.maxClips) };
+   313→   313→   313→  }
+   314→   314→   314→
+   315→   315→   315→  // 2) حل روابط task_ids أولًا (مهام فيديو مكتملة بالترتيب) ثم urls المباشرة
+   316→   316→   316→  const videos: string[] = [];
+   317→   317→   317→  const failedDetails: string[] = [];
+   318→   318→   318→  for (const tid of taskIdsArg) {
+   319→   319→   319→    const t = await getTask(String(tid));
+   320→   320→   320→    if (!t || t.type !== "video") failedDetails.push(`• ${tid}: مهمة غير موجودة أو ليست مهمة فيديو`);
+   321→   321→   321→    else if (t.status !== "completed") failedDetails.push(`• ${tid}: المهمة ليست مكتملة بعد (حالتها ${t.status})`);
+   322→   322→   322→    else {
+   323→   323→   323→      const urls = safeParse<string[]>(t.result_urls_json, []);
+   324→   324→   324→      if (!urls.length) failedDetails.push(`• ${tid}: مهمة مكتملة بلا روابط`);
+   325→   325→   325→      else videos.push(urls[0]);
+   326→   326→   326→    }
+   327→   327→   327→  }
+   328→   328→   328→  videos.push(...urlsArg.map(String));
+   329→   329→   329→
+   330→   330→   330→  if (videos.length < 2) {
+   331→   331→   331→    return { status: "params", isError: true, text: fmtMergeNeedsTwo(failedDetails.join("\n")) };
+   332→   332→   332→  }
+   333→   333→   333→  // كل الروابط http/https مباشرة وعامة
+   334→   334→   334→  const bad = videos.find((u) => !/^https?:\/\//i.test(u));
+   335→   335→   335→  if (bad) return { status: "params", isError: true, text: fmtFailed(`الرابط غير صالح للدمج (يجب أن يكون http/https مباشرًا وعامًا): ${bad.slice(0, 120)}`) };
+   336→   336→   336→
+   337→   337→   337→  // 3) سجّل المهمة أولًا
+   338→   338→   338→  let task = await insertTask({
+   339→   339→   339→    id: randomUUID(),
+   340→   340→   340→    provider: "merger",
+   341→   341→   341→    model: "video-merger",
+   342→   342→   342→    type: "merge",
+   343→   343→   343→    prompt: `دمج ${videos.length} مقاطع`,
+   344→   344→   344→    params_json: JSON.stringify(args),
+   345→   345→   345→    status: "processing",
+   346→   346→   346→  });
+   347→   347→   347→
+   348→   348→   348→  // 4) أنشئ مهمة الدمج لدى الخدمة — أي خطأ معلن = فشل حتمي فوري
+   349→   349→   349→  let jobId: string;
+   350→   350→   350→  try {
+   351→   351→   351→    const createdJob = await createMergeJob(videos);
+   352→   352→   352→    jobId = createdJob.jobId;
+   353→   353→   353→  } catch (err) {
+   354→   354→   354→    const msg = sanitize(err instanceof Error ? err.message : String(err));
+   355→   355→   355→    task = (await updateTask(task.id, { status: "failed", error_message: msg }))!;
+   356→   356→   356→    return { status: "failed", isError: true, text: fmtFailed(msg), task };
+   357→   357→   357→  }
+   358→   358→   358→  task = (await updateTask(task.id, { provider_task_id: jobId }))!;
+   359→   359→   359→
+   360→   360→   360→  // 5) أطلق process — يُنفَّذ مرة واحدة فقط (القفل داخل عميل الدمج)
+   361→   361→   361→  const processPromise = processMergeJob(jobId).catch(() => null);
+   362→   362→   362→
+   363→   363→   363→  const waitSec = effectiveWait(args.wait_seconds as number | undefined, 60);
+   364→   364→   364→  const deadline = Date.now() + waitSec * 1000;
+   365→   365→   365→
+   366→   366→   366→  // 6) استعلم كل 3 ثوانٍ مع بث تقدم — تحديث الحالة يُكتب في Turso فورًا
+   367→   367→   367→  while (Date.now() < deadline) {
+   368→   368→   368→    let info: MergerJobInfo;
+   369→   369→   369→    try {
+   370→   370→   370→      info = await getMergeJob(jobId);
+   371→   371→   371→    } catch (err) {
+   372→   372→   372→      if (err instanceof ProviderError && (err as ProviderError & { mergerNotFound?: boolean }).mergerNotFound) {
+   373→   373→   373→        task = (await updateTask(task.id, { status: "failed", error_message: err.message }))!;
+   374→   374→   374→        return { status: "failed", isError: true, text: fmtFailed(err.message), task };
+   375→   375→   375→      }
+   376→   376→   376→      await sleep(POLL_INTERVAL_MS); // شبكتنا نحن → مؤقت
+   377→   377→   377→      continue;
+   378→   378→   378→    }
+   379→   379→   379→
+   380→   380→   380→    if (info.status === "done" && (info.videoUrl || info.downloadUrl)) {
+   381→   381→   381→      const urls = [info.videoUrl ?? info.downloadUrl!];
+   382→   382→   382→      task = (await updateTask(task.id, { status: "completed", result_urls_json: JSON.stringify(urls) }))!;
+   383→   383→   383→      notify?.(100, 100, "اكتمل الدمج").catch(() => {});
+   384→   384→   384→      void processPromise; // اكتملنا قبل انتهاء انتظار process — لا شيء مطلوب
+   385→   385→   385→      return { status: "completed", text: fmtMergeDone(urls), task };
+   386→   386→   386→    }
+   387→   387→   387→    if (info.status === "failed") {
+   388→   388→   388→      // خطأ معلن من الخدمة = فشل نهائي فوري — لا إعادة محاولة (قاعدة حتمية)
+   389→   389→   389→      task = (await updateTask(task.id, { status: "failed", error_message: sanitize(info.error ?? "فشل الدمج") }))!;
+   390→   390→   390→      void processPromise;
+   391→   391→   391→      return { status: "failed", isError: true, text: fmtFailed(sanitize(info.error ?? "فشل الدمج")), task };
+   392→   392→   392→    }
+   393→   393→   393→
+   394→   394→   394→    task = (await updateTask(task.id, { status: "processing", progress: info.progress }))!;
+   395→   395→   395→    notify?.(info.progress, 100, `جارٍ الدمج… ${info.progress}%`).catch(() => {});
+   396→   396→   396→    await sleep(POLL_INTERVAL_MS);
+   397→   397→   397→  }
+   398→   398→   398→
+   399→   399→   399→  void processPromise;
+   400→   400→   400→  return { status: "processing", text: fmtProcessing(task.id, task.progress), task };
+   401→   401→   401→}
+   402→   402→   402→
+   403→   403→   403→// -----------------------------------------------------------------------------
+   404→   404→   404→// تتبع مهمة — refreshTask (get_task) مع نفس منطق التبديل أعلاه
+   405→   405→   405→// -----------------------------------------------------------------------------
+   406→   406→   406→export async function refreshTask(taskId: string): Promise<ToolOutcome> {
+   407→   407→   407→  let task = await getTask(taskId);
+   408→   408→   408→  if (!task) return { status: "failed", isError: true, text: fmtTaskNotFound(taskId) };
+   409→   409→   409→
+   410→   410→   410→  if (task.status === "completed") {
+   411→   411→   411→    const urls = safeParse<string[]>(task.result_urls_json, []);
+   412→   412→   412→    return { status: "completed", text: fmtGetTask({ ...task, urls }), task };
+   413→   413→   413→  }
+   414→   414→   414→  if (task.status === "failed") {
+   415→   415→   415→    return { status: "failed", isError: true, text: fmtGetTask({ ...task, urls: [] }), task };
+   416→   416→   416→  }
+   417→   417→   417→
+   418→   418→   418→  // جارية — حدّثها حية
+   419→   419→   419→  if (task.type === "merge") return refreshMergeTask(task);
+   420→   420→   420→
+   421→   421→   421→  const modelDef = resolveModel(task.model);
+   422→   422→   422→  if (!modelDef) {
+   423→   423→   423→    task = (await updateTask(task.id, { status: "failed", error_message: "موديل المهمة غير معروف" }))!;
+   424→   424→   424→    return { status: "failed", isError: true, text: fmtFailed(task.error_message!), task };
+   425→   425→   425→  }
+   426→   426→   426→
+   427→   427→   427→  if (!task.provider || !task.provider_task_id) {
+   428→   428→   428→    // لم يُنشأ بعد على أي مزود (فشل على كل المفاتيح) — أعد المحاولة بعد تهدئة 45 ثانية
+   429→   429→   429→    const since = Date.now() - new Date(task.updated_at.replace(" ", "T") + "Z").getTime();
+   430→   430→   430→    if (since < CREATE_RETRY_COOLDOWN_MS) {
+   431→   431→   431→      return { status: "processing", text: fmtProcessing(task.id, task.progress), task };
+   432→   432→   432→    }
+   433→   433→   433→    const input = task.type === "image" ? buildImageInput(safeParse(task.params_json, {})) : buildVideoInput(safeParse(task.params_json, {}));
+   434→   434→   434→    const created = await tryCreateWithKeys({ task, modelDef, input });
+   435→   435→   435→    if (created.kind === "created" || created.kind === "created_sync") {
+   436→   436→   436→      task = (await updateTask(task.id, {
+   437→   437→   437→        provider: created.key!.provider, key_id: created.key!.id,
+   438→   438→   438→        provider_task_id: created.providerTaskId ?? null,
+   439→   439→   439→        error_message: null, progress: 5,
+   440→   440→   440→      }))!;
+   441→   441→   441→      if (created.kind === "created_sync") {
+   442→   442→   442→        task = (await updateTask(task.id, { status: "completed", result_urls_json: JSON.stringify(created.syncUrls) }))!;
+   443→   443→   443→        return { status: "completed", text: fmtImageDone(created.syncUrls!), task };
+   444→   444→   444→      }
+   445→   445→   445→      return { status: "processing", text: fmtProcessing(task.id, 5), task };
+   446→   446→   446→    }
+   447→   447→   447→    if (created.kind === "params") {
+   448→   448→   448→      task = (await updateTask(task.id, { status: "failed", error_message: created.paramsMessage }))!;
+   449→   449→   449→      return { status: "failed", isError: true, text: fmtFailed(created.paramsMessage!), task };
+   450→   450→   450→    }
+   451→   451→   451→    // ما زلنا بلا مفاتيح صالحة — اضبط التهدئة من جديد (لا شيء يُذكر للعميل)
+   452→   452→   452→    task = (await updateTask(task.id, { error_message: "بانتظار توفر مفتاح صالح…" }))!;
+   453→   453→   453→    return { status: "processing", text: fmtProcessing(task.id), task };
+   454→   454→   454→  }
+   455→   455→   455→
+   456→   456→   456→  // مهمة جارية لدى مزود — استعلم حالتها
+   457→   457→   457→  const adapter = getAdapter(task.provider as ProviderId);
+   458→   458→   458→  let keyRow = await findKeyById(task.key_id);
+   459→   459→   459→  if (!keyRow && task.provider_task_id) {
+   460→   460→   460→    // المفتاح حُذف أو غير مسجّل لكن المهمة قائمة لدى المزود — استعلام فقط بأي مفتاح متاح
+   461→   461→   461→    const pool = await getKeyPool([task.provider as ProviderId]);
+   462→   462→   462→    if (pool.length) keyRow = pool[0];
+   463→   463→   463→  }
+   464→   464→   464→  if (!keyRow) {
+   465→   465→   465→    // لا مفتاح للاستعلام ولا مهمة قائمة — أعد الإنشاء على أي مفتاح متاح
+   466→   466→   466→    const input = task.type === "image" ? buildImageInput(safeParse(task.params_json, {})) : buildVideoInput(safeParse(task.params_json, {}));
+   467→   467→   467→    const created = await tryCreateWithKeys({ task, modelDef, input });
+   468→   468→   468→    if (created.kind === "created" || created.kind === "created_sync") {
+   469→   469→   469→      task = (await updateTask(task.id, {
+   470→   470→   470→        provider: created.key!.provider, key_id: created.key!.id,
+   471→   471→   471→        provider_task_id: created.providerTaskId ?? null, progress: 5, error_message: null,
+   472→   472→   472→      }))!;
+   473→   473→   473→      if (created.kind === "created_sync") {
+   474→   474→   474→        task = (await updateTask(task.id, { status: "completed", result_urls_json: JSON.stringify(created.syncUrls) }))!;
+   475→   475→   475→        return { status: "completed", text: fmtImageDone(created.syncUrls!), task };
+   476→   476→   476→      }
+   477→   477→   477→      return { status: "processing", text: fmtProcessing(task.id, 5), task };
+   478→   478→   478→    }
+   479→   479→   479→    return { status: "processing", text: fmtProcessing(task.id, task.progress), task };
+   480→   480→   480→  }
+   481→   481→   481→
+   482→   482→   482→  let check;
+   483→   483→   483→  try {
+   484→   484→   484→    check = await adapter.checkTask(keyRow, task.provider_task_id!);
+   485→   485→   485→  } catch (err) {
+   486→   486→   486→    if (err instanceof ProviderError && err.status === 0) {
+   487→   487→   487→      return { status: "processing", text: fmtProcessing(task.id, task.progress), task }; // شبكة → مؤقت
+   488→   488→   488→    }
+   489→   489→   489→    check = { status: "failed", error: err instanceof Error ? err.message : String(err) };
+   490→   490→   490→  }
+   491→   491→   491→
+   492→   492→   492→  if (check.status === "processing") {
+   493→   493→   493→    const p = check.progress ?? task.progress;
+   494→   494→   494→    if (Number.isFinite(p) && p > task.progress) task = (await updateTask(task.id, { progress: Math.round(p) })) ?? task;
+   495→   495→   495→    return { status: "processing", text: fmtProcessing(task.id, task.progress), task };
+   496→   496→   496→  }
+   497→   497→   497→
+   498→   498→   498→  if (check.status === "completed" && check.urls?.length) {
+   499→   499→   499→    task = (await updateTask(task.id, { status: "completed", result_urls_json: JSON.stringify(check.urls) }))!;
+   500→   500→   500→    return { status: "completed", text: fmtGetTask({ ...task, urls: check.urls }), task };
+   501→   501→   501→  }
+   502→   502→   502→
+   503→   503→   503→  // فشل منتصف مهمة — نفس منطق التبديل
+   504→   504→   504→  const msg = String(check.error ?? "");
+   505→   505→   505→  if (looksLikeKeyIssue(msg)) {
+   506→   506→   506→    const input = task.type === "image" ? buildImageInput(safeParse(task.params_json, {})) : buildVideoInput(safeParse(task.params_json, {}));
+   507→   507→   507→    const created = await tryCreateWithKeys({ task, modelDef, input, skipIds: new Set([keyRow.id]) });
+   508→   508→   508→    if (created.kind === "created" || created.kind === "created_sync") {
+   509→   509→   509→      task = (await updateTask(task.id, {
+   510→   510→   510→        provider: created.key!.provider, key_id: created.key!.id,
+   511→   511→   511→        provider_task_id: created.providerTaskId ?? null, progress: 5, error_message: null,
+   512→   512→   512→      }))!;
+   513→   513→   513→      if (created.kind === "created_sync") {
+   514→   514→   514→        task = (await updateTask(task.id, { status: "completed", result_urls_json: JSON.stringify(created.syncUrls) }))!;
+   515→   515→   515→        return { status: "completed", text: fmtImageDone(created.syncUrls!), task };
+   516→   516→   516→      }
+   517→   517→   517→      return { status: "processing", text: fmtProcessing(task.id, 5), task };
+   518→   518→   518→    }
+   519→   519→   519→    if (created.kind === "params") {
+   520→   520→   520→      task = (await updateTask(task.id, { status: "failed", error_message: created.paramsMessage }))!;
+   521→   521→   521→      return { status: "failed", isError: true, text: fmtFailed(created.paramsMessage!), task };
+   522→   522→   522→    }
+   523→   523→   523→    task = (await updateTask(task.id, { error_message: "بانتظار توفر مفتاح صالح…" }))!;
+   524→   524→   524→    return { status: "processing", text: fmtProcessing(task.id), task };
+   525→   525→   525→  }
+   526→   526→   526→
+   527→   527→   527→  task = (await updateTask(task.id, { status: "failed", error_message: sanitize(msg) }))!;
+   528→   528→   528→  return { status: "failed", isError: true, text: fmtFailed(sanitize(msg)), task };
+   529→   529→   529→}
+   530→   530→   530→
+   531→   531→   531→async function findKeyById(id: string | null): Promise<KeyRow | null> {
+   532→   532→   532→  if (!id) return null;
+   533→   533→   533→  const { getKey } = await import("@/lib/turso");
+   534→   534→   534→  return getKey(id);
+   535→   535→   535→}
+   536→   536→   536→
+   537→   537→   537→// -----------------------------------------------------------------------------
+   538→   538→   538→// تتبع مهمة دمج — refreshMergeTask (القسم 7.3.6)
+   539→   539→   539→// -----------------------------------------------------------------------------
+   540→   540→   540→async function refreshMergeTask(task: TaskRow): Promise<ToolOutcome> {
+   541→   541→   541→  if (!task.provider_task_id) {
+   542→   542→   542→    // فشل إنشاء مهمة الدمج سابقًا — أعد المحاولة بعد التهدئة
+   543→   543→   543→    const since = Date.now() - new Date(task.updated_at.replace(" ", "T") + "Z").getTime();
+   544→   544→   544→    if (since < CREATE_RETRY_COOLDOWN_MS) {
+   545→   545→   545→      return { status: "processing", text: fmtProcessing(task.id, task.progress), task };
+   546→   546→   546→    }
+   547→   547→   547→    const params = safeParse<Record<string, unknown>>(task.params_json, {});
+   548→   548→   548→    const vids = Array.isArray(params.urls) ? (params.urls as string[]).map(String) : [];
+   549→   549→   549→    if (vids.length < 2) {
+   550→   550→   550→      task = (await updateTask(task.id, { status: "failed", error_message: "روابط الدمج الأصلية غير متوفرة" }))!;
+   551→   551→   551→      return { status: "failed", isError: true, text: fmtFailed(task.error_message!), task };
+   552→   552→   552→    }
+   553→   553→   553→    try {
+   554→   554→   554→      const createdJob = await createMergeJob(vids);
+   555→   555→   555→      task = (await updateTask(task.id, { provider_task_id: createdJob.jobId, error_message: null }))!;
+   556→   556→   556→      void processMergeJob(createdJob.jobId).catch(() => null);
+   557→   557→   557→      return { status: "processing", text: fmtProcessing(task.id, task.progress), task };
+   558→   558→   558→    } catch (err) {
+   559→   559→   559→      const msg = sanitize(err instanceof Error ? err.message : String(err));
+   560→   560→   560→      task = (await updateTask(task.id, { status: "failed", error_message: msg }))!;
+   561→   561→   561→      return { status: "failed", isError: true, text: fmtFailed(msg), task };
+   562→   562→   562→    }
+   563→   563→   563→  }
+   564→   564→   564→
+   565→   565→   565→  let info: MergerJobInfo;
+   566→   566→   566→  try {
+   567→   567→   567→    info = await getMergeJob(task.provider_task_id);
+   568→   568→   568→  } catch (err) {
+   569→   569→   569→    if (err instanceof ProviderError && (err as ProviderError & { mergerNotFound?: boolean }).mergerNotFound) {
+   570→   570→   570→      // 404 → فشل نهائي: حُذفت أو انتهت صلاحيتها بعد 24 ساعة
+   571→   571→   571→      task = (await updateTask(task.id, { status: "failed", error_message: err.message }))!;
+   572→   572→   572→      return { status: "failed", isError: true, text: fmtFailed(err.message), task };
+   573→   573→   573→    }
+   574→   574→   574→    return { status: "processing", text: fmtProcessing(task.id, task.progress), task }; // شبكتنا → مؤقت
+   575→   575→   575→  }
+   576→   576→   576→
+   577→   577→   577→  if (info.status === "done" && (info.videoUrl || info.downloadUrl)) {
+   578→   578→   578→    const urls = [info.videoUrl ?? info.downloadUrl!];
+   579→   579→   579→    task = (await updateTask(task.id, { status: "completed", result_urls_json: JSON.stringify(urls) }))!;
+   580→   580→   580→    return { status: "completed", text: fmtMergeDone(urls), task };
+   581→   581→   581→  }
+   582→   582→   582→  if (info.status === "failed") {
+   583→   583→   583→    task = (await updateTask(task.id, { status: "failed", error_message: sanitize(info.error ?? "فشل الدمج") }))!;
+   584→   584→   584→    return { status: "failed", isError: true, text: fmtFailed(sanitize(info.error ?? "فشل الدمج")), task };
+   585→   585→   585→  }
+   586→   586→   586→  if (info.status === "queued") {
+   587→   587→   587→    // أُنشئت المهمة ولم يُنفَّذ process بعد → نفّذه الآن (القفل يمنع التزامن)
+   588→   588→   588→    void processMergeJob(task.provider_task_id).catch(() => null);
+   589→   589→   589→  }
+   590→   590→   590→  task = (await updateTask(task.id, { status: "processing", progress: info.progress }))!;
+   591→   591→   591→  return { status: "processing", text: fmtProcessing(task.id, info.progress), task };
+   592→   592→   592→}
+   593→   593→   593→
+   594→   594→   594→// -----------------------------------------------------------------------------
+   595→   595→   595→// list_media — استرجاع الوسائط المخزنة بروابطها (بدون إعادة توليد)
+   596→   596→   596→// -----------------------------------------------------------------------------
+   597→   597→   597→export async function listMedia(args: Record<string, unknown>): Promise<ToolOutcome> {
+   598→   598→   598→  const { listRecentTasks } = await import("@/lib/turso");
+   599→   599→   599→  const { fmtMediaList } = await import("@/lib/format");
+   600→   600→   600→  const type = args.type as TaskRow["type"] | undefined;
+   601→   601→   601→  const status = args.status as TaskRow["status"] | undefined;
+   602→   602→   602→  const limit = typeof args.limit === "number" ? args.limit : 10;
+   603→   603→   603→
+   604→   604→   604→  const tasks = await listRecentTasks(limit, { type, status });
+   605→   605→   605→  const items = tasks.map((t) => ({
+   606→   606→   606→    id: t.id,
+   607→   607→   607→    type: t.type,
+   608→   608→   608→    status: t.status,
+   609→   609→   609→    model: t.model,
+   610→   610→   610→    prompt: t.prompt,
+   611→   611→   611→    urls: safeParse<string[]>(t.result_urls_json, []),
+   612→   612→   612→    createdAt: t.created_at,
+   613→   613→   613→    error: t.error_message,
+   614→   614→   614→    attempts: safeParse<AttemptRecord[]>(t.attempts_json, []).length,
+   615→   615→   615→  }));
+   616→   616→   616→  return { status: "completed", text: fmtMediaList(items) };
+   617→   617→   617→}
+   618→   618→   618→
