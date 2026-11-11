@@ -1,0 +1,17 @@
+{
+  "name": "video-merger-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "موقع دمج الفيديوهات + واجهة API عامة — دوال Vercel Serverless (Node.js خالص، بلا خطوة بناء)",
+  "main": "api/jobs.js",
+  "scripts": {
+    "dev": "node scripts/dev-server.js",
+    "test:unit": "node scripts/test-unit.js",
+    "test:http": "node scripts/test-http.js"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0"
+  }
+}
