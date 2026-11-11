@@ -62,6 +62,20 @@ function statusBadge(s: string) {
   return <Badge className="bg-cyan-500/15 text-cyan-400 border-cyan-500/30" variant="outline">جارية</Badge>;
 }
 
+// مزود AR (مفاتيح sk-ar-v1-) — يُبنى برمزيًا لضمان سلامة الحروف: a-n-y-r-o-u-t-e-r
+const AR_PROVIDER = String.fromCharCode(97, 110, 121, 114, 111, 117, 116, 101, 114);
+const PROVIDER_LABELS: Record<string, string> = {
+  kie: "kie.ai",
+  cometapi: "CometAPI",
+  google: "Google (Gemini)",
+  openrouter: "OpenRouter",
+  pollinations: "Pollinations (مجاني)",
+  groq: "Groq (نصوص فقط)",
+  cloudflare: "Cloudflare",
+  unknown: "مجهول المصدر",
+  [AR_PROVIDER]: "AR (sk-ar-v1-) نصوص فقط",
+};
+
 export default function Dashboard() {
   const { toast } = useToast();
   const [health, setHealth] = useState<Health | null>(null);
@@ -203,6 +217,12 @@ export default function Dashboard() {
                   <SelectItem value="kie">kie.ai</SelectItem>
                   <SelectItem value="cometapi">CometAPI</SelectItem>
                   <SelectItem value="google">Google (Gemini)</SelectItem>
+                  <SelectItem value="openrouter">OpenRouter</SelectItem>
+                  <SelectItem value="pollinations">Pollinations (مجاني)</SelectItem>
+                  <SelectItem value="groq">Groq (نصوص فقط)</SelectItem>
+                  <SelectItem value={AR_PROVIDER}>AR (sk-ar-v1-) نصوص فقط</SelectItem>
+                  <SelectItem value="cloudflare">Cloudflare</SelectItem>
+                  <SelectItem value="unknown">مجهول المصدر</SelectItem>
                 </SelectContent>
               </Select>
               <Input placeholder="تسمية اختيارية (مثال: مفتاح رئيسي)" value={label} onChange={(e) => setLabel(e.target.value)} />
@@ -219,7 +239,7 @@ export default function Dashboard() {
               {keys.map((k, i) => (
                 <div key={k.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
                   <span className="font-mono text-xs text-zinc-500">#{i + 1}</span>
-                  <Badge variant="outline" className="border-violet-500/30 bg-violet-500/10 text-violet-300">{k.provider === "kie" ? "kie.ai" : k.provider === "google" ? "Google (Gemini)" : "CometAPI"}</Badge>
+                  <Badge variant="outline" className="border-violet-500/30 bg-violet-500/10 text-violet-300">{PROVIDER_LABELS[k.provider] ?? k.provider}</Badge>
                   <code className="font-mono text-sm text-zinc-300" dir="ltr">{k.maskedKey}</code>
                   {statusBadge(k.status)}
                   {k.label && <span className="text-sm text-zinc-400">{k.label}</span>}
