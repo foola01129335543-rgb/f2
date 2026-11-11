@@ -16,7 +16,7 @@ import {
   setKeyStatus, bumpKeyCounters,
   safeParse, type KeyRow, type TaskRow, type AttemptRecord,
 } from "@/lib/turso";
-import { resolveModel, type ModelDef } from "@/lib/models";
+import { resolveModel, type ModelDef, type ProviderId } from "@/lib/models";
 import { classifyProviderError, looksLikeKeyIssue } from "@/lib/keys";
 import { getAdapter, ProviderError, type ImageInput, type VideoInput } from "@/lib/providers";
 import {
@@ -454,11 +454,11 @@ export async function refreshTask(taskId: string): Promise<ToolOutcome> {
   }
 
   // مهمة جارية لدى مزود — استعلم حالتها
-  const adapter = getAdapter(task.provider as "kie" | "cometapi");
+  const adapter = getAdapter(task.provider as ProviderId);
   let keyRow = await findKeyById(task.key_id);
   if (!keyRow && task.provider_task_id) {
     // المفتاح حُذف أو غير مسجّل لكن المهمة قائمة لدى المزود — استعلام فقط بأي مفتاح متاح
-    const pool = await getKeyPool([task.provider as "kie" | "cometapi"]);
+    const pool = await getKeyPool([task.provider as ProviderId]);
     if (pool.length) keyRow = pool[0];
   }
   if (!keyRow) {

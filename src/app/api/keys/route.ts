@@ -43,8 +43,8 @@ export async function POST(req: NextRequest) {
     const apiKey = typeof body?.api_key === "string" ? body.api_key.trim() : "";
     const label = typeof body?.label === "string" ? body.label.trim().slice(0, 80) : "";
 
-    if (provider !== "kie" && provider !== "cometapi") {
-      return NextResponse.json({ error: "المزود يجب أن يكون kie أو cometapi" }, { status: 400 });
+    if (provider !== "kie" && provider !== "cometapi" && provider !== "google") {
+      return NextResponse.json({ error: "المزود يجب أن يكون kie أو cometapi أو google" }, { status: 400 });
     }
     if (!apiKey || apiKey.length < 8) {
       return NextResponse.json({ error: "المفتاح فارغ أو قصير جدًا" }, { status: 400 });

@@ -50,7 +50,7 @@ export interface AttemptRecord {
 
 export interface KeyRow {
   id: string;
-  provider: "kie" | "cometapi";
+  provider: "kie" | "cometapi" | "google";
   label: string;
   api_key: string;
   status: "active" | "exhausted" | "disabled";
@@ -98,6 +98,14 @@ export async function ensureSchema(): Promise<void> {
         last_used_at TEXT,
         last_checked_at TEXT,
         last_error TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )`);
+      // وسائط مولّدة محليًا (صور مزود Google تعود base64) — تُخدَّم عبر /api/media/[id]
+      await db.execute(`CREATE TABLE IF NOT EXISTS media_blobs (
+        id TEXT PRIMARY KEY,
+        mime TEXT NOT NULL,
+        bytes INTEGER DEFAULT 0,
+        data TEXT NOT NULL,
         created_at TEXT DEFAULT (datetime('now'))
       )`);
     })().catch((err) => {
@@ -273,7 +281,7 @@ export async function listKeys(): Promise<KeyRow[]> {
 }
 
 /** مجمع المفاتيح: الترتيب التسلسلي الصارم حسب الإضافة (created_at ASC, id ASC) — ليس round-robin */
-export async function getKeyPool(providers: Array<"kie" | "cometapi">): Promise<KeyRow[]> {
+export async function getKeyPool(providers: Array<"kie" | "cometapi" | "google">): Promise<KeyRow[]> {
   await ensureSchema();
   if (!providers.length) return [];
   const placeholders = providers.map(() => "?").join(",");
@@ -287,7 +295,7 @@ export async function getKeyPool(providers: Array<"kie" | "cometapi">): Promise<
 }
 
 export async function insertKey(k: {
-  id: string; provider: "kie" | "cometapi"; label?: string; api_key: string;
+  id: string; provider: "kie" | "cometapi" | "google"; label?: string; api_key: string;
 }): Promise<KeyRow> {
   await ensureSchema();
   await getDb().execute({
@@ -349,6 +357,25 @@ function mapKey(row: Record<string, unknown>): KeyRow {
     last_error: (row.last_error as string) ?? null,
     created_at: String(row.created_at ?? ""),
   };
+}
+
+// --- وسائط مولّدة (blobs) — صور مزود Google -------------------------------------------------
+export async function insertMediaBlob(b: { id: string; mime: string; data: string }): Promise<void> {
+  await ensureSchema();
+  await getDb().execute({
+    sql: `INSERT INTO media_blobs (id, mime, bytes, data) VALUES (?, ?, ?, ?)`,
+    args: [b.id, b.mime, Math.round((b.data.length * 3) / 4), b.data],
+  });
+}
+
+export async function getMediaBlob(id: string): Promise<{ mime: string; data: string } | null> {
+  await ensureSchema();
+  const rs = await getDb().execute({
+    sql: `SELECT mime, data FROM media_blobs WHERE id = ?`,
+    args: [id],
+  });
+  if (!rs.rows.length) return null;
+  return { mime: String(rs.rows[0].mime), data: String(rs.rows[0].data) };
 }
 
 // --- أدوات مساعدة ---------------------------------------------------------------

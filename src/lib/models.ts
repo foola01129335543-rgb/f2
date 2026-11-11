@@ -3,7 +3,7 @@
 // الأسماء قابلة للتجاوز بمتغيرات البيئة (KIE_IMAGE_MODEL ... إلخ)
 // =============================================================================
 
-export type ProviderId = "kie" | "cometapi";
+export type ProviderId = "kie" | "cometapi" | "google";
 export type TaskProvider = ProviderId | "merger";
 export type MediaType = "image" | "video" | "merge";
 
@@ -12,13 +12,16 @@ export interface ModelDef {
   aliases: string[];          // صيغ بديلة نقبلها ونوحّدها (شرطات/نقاط)
   type: MediaType;
   providers: ProviderId[];    // من يستطيع خدمته — تُجرَّب مفاتيحهم كلها بالترتيب
-  providerModel: Record<ProviderId, string>; // اسم الموديل كما يُرسَل لكل مزود
+  providerModel: Partial<Record<ProviderId, string>>; // اسم الموديل كما يُرسَل لكل مزود (المزودون غير الخادمين بلا قيمة)
 }
 
 const KIE_IMAGE_MODEL = process.env.KIE_IMAGE_MODEL || "gpt-image-2-6/flare-text-to-image";
 const KIE_VIDEO_MODEL = process.env.KIE_VIDEO_MODEL || "grok-imagine-video-1-5-preview";
 const COMETAPI_IMAGE_MODEL = process.env.COMETAPI_IMAGE_MODEL || "gpt-image-2.6-flare-text-to-image";
 const COMETAPI_VIDEO_MODEL = process.env.COMETAPI_VIDEO_MODEL || "grok-imagine-video-1-5-preview";
+// مزود Google (Gemini API) — للصور فقط؛ مفاتيحه بصيغة AQ. الجديدة من Google AI Studio
+// ملاحظة: مفاتيح Google المجانية لا تشمل نماذج الفيديو (Veo) — الفيديو يبقى عبر kie/cometapi
+const GOOGLE_IMAGE_MODEL = process.env.GOOGLE_IMAGE_MODEL || "gemini-2.5-flash-image";
 
 function withAliases(canonical: string, dottedVariant: string): string[] {
   // نقبل الصيغة البديلة بالنقاط (gpt-image-2.6/... أو grok-imagine-video-1.5-preview) ونوحّدها
@@ -30,8 +33,8 @@ export const MODELS: ModelDef[] = [
     canonical: KIE_IMAGE_MODEL,
     aliases: withAliases(KIE_IMAGE_MODEL, KIE_IMAGE_MODEL.replace(/(\d)-(\d)/g, "$1.$2")),
     type: "image",
-    providers: ["kie", "cometapi"],
-    providerModel: { kie: KIE_IMAGE_MODEL, cometapi: COMETAPI_IMAGE_MODEL },
+    providers: ["kie", "cometapi", "google"],
+    providerModel: { kie: KIE_IMAGE_MODEL, cometapi: COMETAPI_IMAGE_MODEL, google: GOOGLE_IMAGE_MODEL },
   },
   {
     canonical: KIE_VIDEO_MODEL,
@@ -41,6 +44,8 @@ export const MODELS: ModelDef[] = [
     providerModel: { kie: KIE_VIDEO_MODEL, cometapi: COMETAPI_VIDEO_MODEL },
   },
 ];
+
+export { GOOGLE_IMAGE_MODEL };
 
 /** توحيد اسم الموديل: يقبل الصيغ البديلة ويعيد التعريف القياسي، أو null إن كان مجهولًا */
 export function resolveModel(name: string | undefined | null): ModelDef | null {

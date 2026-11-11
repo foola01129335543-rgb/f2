@@ -202,6 +202,7 @@ export default function Dashboard() {
                 <SelectContent>
                   <SelectItem value="kie">kie.ai</SelectItem>
                   <SelectItem value="cometapi">CometAPI</SelectItem>
+                  <SelectItem value="google">Google (Gemini)</SelectItem>
                 </SelectContent>
               </Select>
               <Input placeholder="تسمية اختيارية (مثال: مفتاح رئيسي)" value={label} onChange={(e) => setLabel(e.target.value)} />
@@ -218,7 +219,7 @@ export default function Dashboard() {
               {keys.map((k, i) => (
                 <div key={k.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
                   <span className="font-mono text-xs text-zinc-500">#{i + 1}</span>
-                  <Badge variant="outline" className="border-violet-500/30 bg-violet-500/10 text-violet-300">{k.provider === "kie" ? "kie.ai" : "CometAPI"}</Badge>
+                  <Badge variant="outline" className="border-violet-500/30 bg-violet-500/10 text-violet-300">{k.provider === "kie" ? "kie.ai" : k.provider === "google" ? "Google (Gemini)" : "CometAPI"}</Badge>
                   <code className="font-mono text-sm text-zinc-300" dir="ltr">{k.maskedKey}</code>
                   {statusBadge(k.status)}
                   {k.label && <span className="text-sm text-zinc-400">{k.label}</span>}
