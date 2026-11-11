@@ -71,6 +71,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   openrouter: "OpenRouter",
   pollinations: "Pollinations (مجاني)",
   groq: "Groq (نصوص فقط)",
+  bynara: "Bynara (نصوص فقط)",
   cloudflare: "Cloudflare",
   unknown: "مجهول المصدر",
   [AR_PROVIDER]: "AR (sk-ar-v1-) نصوص فقط",
@@ -220,6 +221,7 @@ export default function Dashboard() {
                   <SelectItem value="openrouter">OpenRouter</SelectItem>
                   <SelectItem value="pollinations">Pollinations (مجاني)</SelectItem>
                   <SelectItem value="groq">Groq (نصوص فقط)</SelectItem>
+                  <SelectItem value="bynara">Bynara (نصوص فقط)</SelectItem>
                   <SelectItem value={AR_PROVIDER}>AR (sk-ar-v1-) نصوص فقط</SelectItem>
                   <SelectItem value="cloudflare">Cloudflare</SelectItem>
                   <SelectItem value="unknown">مجهول المصدر</SelectItem>

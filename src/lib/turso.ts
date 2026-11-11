@@ -48,9 +48,9 @@ export interface AttemptRecord {
   at: string;
 }
 
-/** مزودو المفاتيح — يشمل مزودين غير خادمين للتوليد (groq/anyrouter/cloudflare/unknown)
- *  groq ومفاتيح AR (sk-ar-v1-) صالحة لكنها للنصوص فقط — لا نماذج صور/فيديو لديها،
- *  لذلك لا يُذكران في سلاسل التوليد (models.ts) وتُحفظ مفاتيحهما للتوثيق والاستخدام المستقبلي. */
+/** مزودو المفاتيح — يشمل مزودين غير خادمين للتوليد (groq/bynara/anyrouter/cloudflare/unknown)
+ *  groq ومفاتيح AR (sk-ar-v1-) ومفاتيح Bynara (sk-nry-) صالحة لكنها للنصوص فقط — لا نماذج صور/فيديو لديها،
+ *  لذلك لا تُذكر في سلاسل التوليد (models.ts) وتُحفظ مفاتيحها للتوثيق والاستخدام المستقبلي. */
 export type ApiKeyProvider =
   | "kie"
   | "cometapi"
@@ -58,6 +58,7 @@ export type ApiKeyProvider =
   | "openrouter"
   | "pollinations"
   | "groq"
+  | "bynara"
   | "anyrouter"
   | "cloudflare"
   | "unknown";
