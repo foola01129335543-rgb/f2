@@ -27,8 +27,9 @@ import {
   fmtNoKeys, fmtProcessing, fmtTaskNotFound, fmtVideoDone,
 } from "@/lib/format";
 
-// سقف نافذة الانتظار داخل الطلب (قابل للضبط) — بعده يعيد الأداة task_id ليتابع العميل بـ get_task
-const WAIT_CAP = Math.min(Math.max(Number(process.env.MCP_WAIT_CAP_SECONDS ?? 240), 0), 240);
+// سقف نافذة الانتظار داخل الطلب (قابل للضبط عبر MCP_WAIT_CAP_SECONDS) — بعده يعيد الأداة task_id ليتابع العميل بـ get_task
+// الافتراضي 50 ثانية < maxDuration=60 في src/pages/api/mcp.ts حتى يعمل النشر على كل خطط Vercel بلا انقطاع للاتصال.
+const WAIT_CAP = Math.min(Math.max(Number(process.env.MCP_WAIT_CAP_SECONDS ?? 50), 0), 240);
 const POLL_INTERVAL_MS = 3_000;
 const CREATE_RETRY_COOLDOWN_MS = 45_000;
 

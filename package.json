@@ -2,6 +2,9 @@
   "name": "mcp-media-generator",
   "version": "1.2.0",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "description": "خادم MCP لتوليد الصور والفيديو بالذكاء الاصطناعي ودمج المقاطع + لوحة إدارة عربية",
   "scripts": {
     "dev": "next dev -p 3000",

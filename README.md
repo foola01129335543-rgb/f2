@@ -75,7 +75,16 @@ bun run dev                   # http://localhost:3000
 3. أضف متغيرات البيئة: `TURSO_DATABASE_URL` و `TURSO_AUTH_TOKEN` (و`MERGER_API_BASE` بعد نشر خدمة الدمج).
 4. Deploy. بعدها أضف مفتاحًا واحدًا على الأقل من واجهة الإدارة (تبويب «مدير المفاتيح») — يُخزَّن في Turso فيصلح لكل النسخ.
 
-> إن فشل النشر برسالة تخص `maxDuration` على خطة قديمة بلا Fluid Compute، خفّض `maxDuration` من 300 إلى 60 في `src/pages/api/mcp.ts` ومسارات `src/app/api` (أو فعّل Fluid Compute من Project Settings → Functions).
+> **ملاحظة:** `maxDuration` مضبوط افتراضيًا على 60 ثانية في `src/pages/api/mcp.ts` — يعمل على كل الخطط (Hobby/Pro، مع أو بدون Fluid Compute). نافذة الانتظار داخل الطلب 50 ثانية بعدها تعيد الأداة `task_id` ليتابعها العميل بـ `get_task`. وعلى Pro أو Fluid Compute (حدّه 800 ثانية) يمكنك رفع `maxDuration` إلى 300 وضبط `MCP_WAIT_CAP_SECONDS=240` لانتظار أطول داخل الطلب.
+
+#### حل مشاكل النشر الشائعة
+
+| الرسالة / العَرَض في Build Logs | الحل |
+|---|---|
+| `maxDuration` exceeds your plan's limit | المشروع الحالي مضبوط 60 ثانية ويقبل على كل الخطط — لو ظهرت فتأكد أن آخر نسخة من المستودع منشورة (Redeploy) |
+| unsupported Node.js version | Settings → Node.js Version → اختر 22.x (المستودع يطلب ‎>=20.9 عبر `engines`) |
+| No framework detected / Build fails فورًا | تأكد أن **Root Directory** فارغ (جذر المستودع) وأن Framework Preset هو Next.js |
+| النشر نجح لكن اللوحة تقول «غير متصل» أو MCP يفشل | متغيرات البيئة ناقصة — أضف `TURSO_DATABASE_URL` و `TURSO_AUTH_TOKEN` ثم **Redeploy** (تغيير المتغيرات لا يُفعّل وحده بدون إعادة نشر) |
 
 ### المشروع الثاني — خدمة دمج الفيديوهات
 

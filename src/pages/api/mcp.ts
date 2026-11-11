@@ -18,9 +18,12 @@ import { z } from "zod";
 import { runGeneration, runMerge, refreshTask, listMedia, type ToolOutcome } from "@/lib/generation";
 import { MODELS } from "@/lib/models";
 
+// maxDuration=60 يعمل على كل خطط Vercel (Hobby/Pro، مع أو بدون Fluid Compute).
+// نافذة الانتظار داخل الطلب مضبوطة 50 ثانية في src/lib/generation.ts (WAIT_CAP)
+// — بعدها تُعاد المهمة task_id ليتابعها العميل عبر get_task.
 export const config = {
   api: { bodyParser: false, externalResolver: true },
-  maxDuration: 300,
+  maxDuration: 60,
 };
 
 export const SERVER_INFO = { name: "media-generator-mcp", version: "1.2.0" } as const;
