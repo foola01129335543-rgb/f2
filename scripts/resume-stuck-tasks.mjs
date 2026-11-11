@@ -1,6 +1,7 @@
-// استئناف المهام المتعطلة عبر استدعاء get_task على الـ MCP endpoint المحلي
-// get_task على مهمة بلا provider_task_id ⇒ يعيد محاولة الإنشاء تلقائيًا بعد التهدئة
-const BASE = "http://localhost:3000/mcp";
+// استئناف المهام المتعطلة عبر استدعاء get_task على الـ MCP endpoint
+// الاستخدام: node scripts/resume-stuck-tasks.mjs [BASE_URL] task_id1 task_id2 ...
+const BASE = process.argv[2]?.startsWith("http") ? process.argv[2] : "http://localhost:3000/mcp";
+const TASKS = process.argv.slice(2).filter((a) => !a.startsWith("http"));
 
 async function mcpCall(method, params, id, sessionId) {
   const res = await fetch(BASE, {
@@ -24,7 +25,6 @@ async function mcpCall(method, params, id, sessionId) {
   return { status: res.status, sessionId: sid, body };
 }
 
-const TASKS = process.argv.slice(2);
 let sessionId = null;
 
 (async () => {
